@@ -141,6 +141,7 @@ class VitalSignProcessor:
         
         self.evm = GPUEulerianMagnifier(buffer_size=32, fs=fps, alpha=40.0)
         self.face_detected = False
+        self._frame_count = 0
 
     def _safe_mean_bgr(self, frame_bgr, x, y, w, h):
         roi = frame_bgr[y:y+h, x:x+w]
@@ -159,21 +160,28 @@ class VitalSignProcessor:
         return (rgb_fh + rgb_lc + rgb_rc) / 3.0, (fh_x, fh_y, fh_w, fh_h, lc_x, lc_y, lc_w, lc_h, rc_x, rc_w)
 
     def process_frame(self, frame_bgr):
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
-        faces = self.detector.detectMultiScale(small_gray, 1.2, 5, minSize=(30, 30))
-        faces = [[int(x*2), int(y*2), int(w*2), int(h*2)] for (x, y, w, h) in faces]
-
-        self.face_detected = False
-        if len(faces):
-            fx, fy, fw, fh = max(faces, key=lambda r: r[2] * r[3])
-            self._last_face = (fx, fy, fw, fh)
-            self.face_detected = True
-        elif self._last_face is not None:
+        self._frame_count += 1
+        
+        # Throttle face detection to every 5 frames to save CPU
+        if self._frame_count % 5 == 1 or self._last_face is None:
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            small_gray = cv2.resize(gray, (0, 0), fx=0.5, fy=0.5)
+            faces = self.detector.detectMultiScale(small_gray, 1.2, 5, minSize=(30, 30))
+            faces = [[int(x*2), int(y*2), int(w*2), int(h*2)] for (x, y, w, h) in faces]
+            
+            self.face_detected = False
+            if len(faces):
+                fx, fy, fw, fh = max(faces, key=lambda r: r[2] * r[3])
+                self._last_face = (fx, fy, fw, fh)
+                self.face_detected = True
+            elif self._last_face is not None:
+                fx, fy, fw, fh = self._last_face
+                self.face_detected = True
+            else:
+                return frame_bgr
+        else:
             fx, fy, fw, fh = self._last_face
             self.face_detected = True
-        else:
-            return frame_bgr
 
         # Vitals Signal
         rgb_val, rects = self._extract_rois(frame_bgr, fx, fy, fw, fh)
@@ -184,8 +192,8 @@ class VitalSignProcessor:
             self.motion_buffer.append(float(nose_y - self._prev_roi_y))
         self._prev_roi_y = nose_y
 
-        # GPU EVM
-        annotated = self.evm.push(frame_bgr, (fx, fy, fw, fh))
+        # GPU EVM is disabled for higher FPS and smooth performance
+        annotated = frame_bgr.copy()
 
         # Overlays
         TEAL, GREEN, ORANGE = (0, 220, 180), (0, 220, 60), (0, 160, 255)
